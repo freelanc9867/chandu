@@ -297,3 +297,19 @@ if __name__ == "__main__":
         log("\n⏹️ Monitoring stopped by user")
     except Exception as e:
         log(f"❌ Fatal error: {e}")
+# Simple HTTP server to keep Render Web Service alive
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+
+def start_ping_server():
+    server = HTTPServer(('0.0.0.0', 8000), PingHandler)
+    server.serve_forever()
+
+# Start the ping server in a background thread
+threading.Thread(target=start_ping_server, daemon=True).start()
