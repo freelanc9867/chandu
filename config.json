@@ -1,0 +1,25 @@
+{
+  "target_channels": [
+    
+    "meta_ads_expert_nitin","nitin9867","Doublebattings"
+  ],
+  "chunk_size": 8,
+  "chunk_pause": 45,
+  "delay_min": 3,
+  "delay_max": 8,
+  "stay_time_min": 2,
+  "stay_time_max": 5,
+  "view_latest_posts": 1,
+  "debug_mode": false,
+  "continuous_monitoring": true,
+  "check_interval_min": 60,
+  "check_interval_max": 120,
+  "max_sessions_per_view": 10,
+  "session_rotation": true,
+  "session_health_check_interval": 3600,
+  "flood_protection": true,
+  "max_retries": 5,
+  "error_delay": 30,
+  "ip_safety_mode": true,
+  "smart_session_distribution": true
+}
