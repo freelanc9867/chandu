@@ -1,2 +1,2 @@
 #!/bin/bash
-python3 autoview.py
+python3 auto_viewer.py
