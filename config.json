@@ -3,6 +3,10 @@
     
     "meta_ads_expert_nitin","nitin9867","Doublebattings","Priyankamamoffcial","fgkkjgfd","fgjlkfdfhjkkg","PREDICTOR_BABU_TOSS_MATCH_IPL","NetworkFixer","crickpeek","1281015286","anurajdwi","t20prediction_ipl2025","IPL_Tipping_Channel","ofififigog","Raginijiprediction","kfifrgoggzgh","TossMassanger","UP_DADAA","ufuehyfhik","ufuehyfhik","shophiya","UMPIREDECIGEN","jeff_bejos"
   ],
+  "enable_reactions": true,
+  "max_reactions_per_post": 10,
+  "available_reactions": ["👍", "❤️", "🔥", "🎉", "👏", "🥰", "💯", "🤩"],
+  "max_posts_per_channel": 4,
   "chunk_size": 8,
   "chunk_pause": 45,
   "delay_min": 3,
@@ -21,5 +25,9 @@
   "max_retries": 5,
   "error_delay": 30,
   "ip_safety_mode": true,
-  "smart_session_distribution": true
+  "smart_session_distribution": true,
+  "work_time_min": 3600,  
+  "work_time_max": 7200,  
+ "sleep_time_min": 600,   
+  "sleep_time_max": 1800
 }
