@@ -1,0 +1,276 @@
+import openpyxl
+import asyncio
+import json
+import os
+import random
+import time
+import traceback
+from datetime import datetime
+from urllib.parse import urlparse
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import GetMessagesViewsRequest, SendReactionRequest
+from telethon.tl.types import ReactionEmoji
+from telethon.errors.rpcerrorlist import (
+    UserNotParticipantError, FloodWaitError, UserDeactivatedError,
+    AuthKeyUnregisteredError, UserBannedInChannelError
+)
+
+# Constants
+VERSION = "7.0.0-PACED"
+LOGS_DIR = "logs"
+LOG_FILE = os.path.join(LOGS_DIR, f"view_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+LAST_SEEN_FILE = "last_seen.json"
+SESSIONS_FILE = "sessions.xlsx"
+CONFIG_FILE = "config.json"
+
+if not os.path.exists(LOGS_DIR):
+    os.makedirs(LOGS_DIR)
+
+def log(msg, print_to_console=True):
+    """Logs a message to the console and the log file."""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = f"{timestamp} - {msg}"
+    if print_to_console:
+        print(log_entry)
+    with open(LOG_FILE, "a", encoding="utf-8") as lf:
+        lf.write(f"{log_entry}\n")
+
+def load_config():
+    """Loads user config and merges it with defaults for robustness."""
+    default_config = {
+        "target_channels": [],
+        "enable_reactions": False,
+        "max_reactions_per_post": 8,
+        "available_reactions": ["👍", "❤️", "🔥", "🎉", "👏", "🥰", "💯"],
+        "max_posts_per_channel": 20, # Max posts to check per channel
+        "posts_per_action_batch": 5, # How many posts to process at once
+        "delay_between_batches_min": 15, # Pause between batches
+        "delay_between_batches_max": 45,
+        "check_interval_min": 10, # Pause between checking different channels
+        "check_interval_max": 30,
+        "max_sessions_per_action": 15, # Max sessions to use for any batch
+        "work_time_min": 3600 * 2,
+        "work_time_max": 3600 * 4,
+        "sleep_time_min": 1800,
+        "sleep_time_max": 3600
+    }
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            user_config = json.load(f)
+            merged_config = {**default_config, **user_config}
+            log(f"✅ Configuration loaded and merged from {CONFIG_FILE}")
+            return merged_config
+    except FileNotFoundError:
+        log(f"⚠️ {CONFIG_FILE} not found. Using default configuration.")
+        return default_config
+    except Exception as e:
+        log(f"❌ Error loading config, using defaults: {e}")
+        return default_config
+
+def load_sessions(excel_file=SESSIONS_FILE):
+    """Loads session data from the Excel file, handling different header names."""
+    try:
+        wb = openpyxl.load_workbook(excel_file)
+        ws = wb.active
+        headers = [str(cell.value).lower().strip() for cell in ws[1] if cell.value]
+        session_key = 'session_str' if 'session_str' in headers else 'session_string'
+        required = ['phone', 'api_id', 'api_hash', session_key]
+        for req in required:
+            if req not in headers:
+                log(f"❌ Critical Error: Required column '{req}' not found in '{excel_file}'. Found: {headers}")
+                return []
+        
+        sessions = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            session_data = dict(zip(headers, row))
+            if all(session_data.get(k) for k in required):
+                sessions.append({
+                    "phone": str(session_data['phone']), "api_id": int(session_data['api_id']),
+                    "api_hash": str(session_data['api_hash']), "session_str": str(session_data[session_key]),
+                    "proxy": session_data.get('proxy'), "client": None, "is_active": False
+                })
+        log(f"✅ Loaded {len(sessions)} sessions from {excel_file}")
+        return sessions
+    except FileNotFoundError:
+        log(f"❌ Sessions file not found: {excel_file}")
+    except Exception as e:
+        log(f"❌ Error loading sessions: {e}")
+    return []
+
+def parse_proxy(proxy_str):
+    """Parses a proxy string into a dictionary for Telethon."""
+    if not proxy_str: return None
+    try:
+        p = urlparse(proxy_str)
+        return {"proxy_type": p.scheme, "addr": p.hostname, "port": p.port, "username": p.username, "password": p.password}
+    except Exception as e:
+        log(f"⚠️ Could not parse proxy: '{proxy_str}'. Error: {e}")
+        return None
+
+def normalize_identifier(identifier):
+    """Correctly formats a channel ID for the Telegram API."""
+    try:
+        numeric_id = int(identifier)
+        return int(f"-100{numeric_id}") if numeric_id > 0 else numeric_id
+    except (ValueError, TypeError):
+        return identifier
+
+async def initialize_clients(sessions):
+    """Initializes all clients with their respective proxies."""
+    log("🚀 Initializing all client sessions...")
+    active_sessions = []
+    for session in sessions:
+        proxy_info = parse_proxy(session.get('proxy'))
+        client = TelegramClient(StringSession(session["session_str"]), session["api_id"], session["api_hash"], proxy=proxy_info)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                log(f"❌ Session {session['phone']} is not authorized. Disabling.")
+                session['is_active'] = False; await client.disconnect()
+                continue
+            session['client'] = client
+            session['is_active'] = True
+            active_sessions.append(session)
+            log(f"✅ Session {session['phone']} connected" + (f" via proxy {proxy_info['addr']}" if proxy_info else ""))
+        except Exception as e:
+            log(f"❌ Failed to initialize session {session['phone']}: {e}")
+            session['is_active'] = False
+            if client.is_connected(): await client.disconnect()
+    return active_sessions
+
+async def perform_session_action(session, channel_id, post_batch):
+    """A single session views and reacts to a small batch of posts."""
+    try:
+        await asyncio.sleep(random.uniform(1, 3)) # Small initial stagger
+        await session['client'](GetMessagesViewsRequest(peer=channel_id, id=post_batch, increment=True))
+        log(f"✅ {session['phone']} viewed {len(post_batch)} post(s).")
+
+        if config.get("enable_reactions"):
+            available_reactions = config.get("available_reactions", [])
+            if available_reactions:
+                # React to one random post from the batch to seem more natural
+                post_to_react = random.choice(post_batch)
+                await asyncio.sleep(random.uniform(1, 4))
+                reaction = random.choice(available_reactions)
+                await session['client'](SendReactionRequest(peer=channel_id, msg_id=post_to_react, reaction=[ReactionEmoji(emoticon=reaction)]))
+                log(f"✅ {session['phone']} reacted with '{reaction}' to post {post_to_react}.")
+    
+    except FloodWaitError as e:
+        log(f"🌊 FloodWait for {session['phone']}: waiting {e.seconds + 5} seconds...")
+        await asyncio.sleep(e.seconds + 5)
+    except Exception as e:
+        if isinstance(e, (UserDeactivatedError, AuthKeyUnregisteredError, UserBannedInChannelError)):
+            session['is_active'] = False
+            log(f"☠️ Deactivated session {session['phone']} due to critical error: {e}")
+        else:
+            log(f"❌ Action failed for {session['phone']}: {e}")
+
+async def continuous_monitor(sessions, config):
+    """Main loop with work/sleep cycles and paced, batched processing."""
+    last_seen = json.load(open(LAST_SEEN_FILE)) if os.path.exists(LAST_SEEN_FILE) else {}
+    work_start_time = time.time()
+    work_duration = random.uniform(config['work_time_min'], config['work_time_max'])
+    log(f"💼 Starting work cycle of ~{int(work_duration / 60)} minutes.")
+    
+    while True:
+        # Check for and execute sleep cycle
+        if time.time() - work_start_time > work_duration:
+            sleep_duration = random.uniform(config['sleep_time_min'], config['sleep_time_max'])
+            log(f"😴 Work cycle finished. Sleeping for ~{int(sleep_duration / 60)} minutes.")
+            await asyncio.sleep(sleep_duration)
+            work_start_time = time.time()
+            work_duration = random.uniform(config['work_time_min'], config['work_time_max'])
+            log(f"💼 Starting new work cycle of ~{int(work_duration / 60)} minutes.")
+
+        active_sessions = [s for s in sessions if s.get('is_active')]
+        if not active_sessions:
+            log("❌ No active sessions. Waiting for 5 minutes.")
+            await asyncio.sleep(300)
+            continue
+
+        random.shuffle(config['target_channels'])
+        for channel_config_id in config['target_channels']:
+            api_channel_id = normalize_identifier(channel_config_id)
+            channel_key = str(channel_config_id)
+            
+            try:
+                check_client = random.choice(active_sessions)['client']
+                entity = await check_client.get_entity(api_channel_id)
+                
+                min_id = last_seen.get(channel_key, 0)
+                messages = await check_client.get_messages(entity, min_id=min_id, limit=config.get("max_posts_per_channel", 20))
+                
+                new_post_ids = sorted([msg.id for msg in messages if msg.id > min_id])
+                
+                if new_post_ids:
+                    log(f"⚡ Found {len(new_post_ids)} new posts in '{channel_key}'. Starting paced processing.")
+                    
+                    # --- Post Batching Logic ---
+                    post_batch_size = config.get("posts_per_action_batch", 5)
+                    for i in range(0, len(new_post_ids), post_batch_size):
+                        post_batch = new_post_ids[i:i + post_batch_size]
+                        log(f"▶️ Processing batch {i//post_batch_size + 1} ({len(post_batch)} posts) for '{channel_key}'...")
+                        
+                        num_sessions_to_use = min(len(active_sessions), config.get("max_sessions_per_action", 15))
+                        sessions_for_action = random.sample(active_sessions, num_sessions_to_use)
+                        
+                        tasks = [perform_session_action(s, api_channel_id, post_batch) for s in sessions_for_action]
+                        await asyncio.gather(*tasks)
+                        
+                        if i + post_batch_size < len(new_post_ids):
+                            batch_pause = random.uniform(config.get("delay_between_batches_min", 15), config.get("delay_between_batches_max", 45))
+                            log(f"⏸️ Pausing for {batch_pause:.1f}s before next batch.")
+                            await asyncio.sleep(batch_pause)
+
+                    last_seen[channel_key] = max(new_post_ids)
+                    with open(LAST_SEEN_FILE, 'w') as f: json.dump(last_seen, f)
+            
+            except Exception as e:
+                log(f"❌ Error processing channel '{channel_key}': {e}")
+            
+            # --- Inter-Channel Delay ---
+            channel_pause = random.uniform(config.get("check_interval_min", 10), config.get("check_interval_max", 30))
+            log(f"--- Finished with '{channel_key}'. Pausing for {channel_pause:.1f}s before next channel. ---")
+            await asyncio.sleep(channel_pause)
+
+async def main():
+    """Main function to initialize and run the bot."""
+    log(f"--- Telegram Bot v{VERSION} ---")
+    global config
+    config = load_config()
+    all_sessions = load_sessions()
+    if not all_sessions:
+        log("❌ No sessions loaded. Please check your sessions.xlsx file. Retrying in 5 minutes.")
+        await asyncio.sleep(300)
+        return
+
+    active_sessions = await initialize_clients(all_sessions)
+    if not active_sessions:
+        log("❌ No sessions could be initialized. Retrying in 5 minutes.")
+        await asyncio.sleep(300)
+        return
+    
+    try:
+        await continuous_monitor(all_sessions, config)
+    finally:
+        log("🔌 Disconnecting all clients before exit or restart...")
+        disconnect_tasks = [s["client"].disconnect() for s in all_sessions if s.get("client") and s["client"].is_connected()]
+        if disconnect_tasks:
+            await asyncio.gather(*disconnect_tasks)
+        log("✅ All clients disconnected.")
+
+if __name__ == "__main__":
+    """Main entry point with automatic crash restart."""
+    while True:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            log("\n⏹️ Process stopped manually by user.")
+            break
+        except Exception as e:
+            log(f"💥 FATAL UNHANDLED ERROR IN MAIN LOOP: {e}")
+            log(traceback.format_exc())
+            log("🔁 Restarting script in 60 seconds after crash...")
+            time.sleep(60)
