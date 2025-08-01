@@ -176,7 +176,9 @@ async def check_for_new_posts(client, api_channel_id, channel_key, last_seen):
 async def continuous_monitor(sessions, config):
     log("🚀 Starting continuous monitoring...")
     last_seen = load_last_seen()
+    config = load_config()  # Reload config.json dynamically
     target_channels = config.get("target_channels", [])
+
     session_index = 0
 
     while True:
@@ -231,3 +233,4 @@ if __name__ == "__main__":
         log("\n⏹️ Monitoring stopped by user")
     except Exception as e:
         log(f"❌ Fatal error: {e}")
+
